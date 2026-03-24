@@ -9,6 +9,21 @@ Aplicación web para control de stock con carga de ventas, ingresos/ajustes de s
 - Stock: ingreso y ajuste
 - Reportes: unidades y financiero por mes (imprimir/PDF)
 
+## Screenshots
+
+### Login
+![Login](docs/screenshots/login.png)
+
+### Inicio
+![Inicio 1](docs/screenshots/inicio-1.png)
+![Inicio 2](docs/screenshots/inicio-2.png)
+
+### Productos
+![Productos](docs/screenshots/productos.png)
+
+### Ventas
+![Ventas](docs/screenshots/ventas.png)
+
 ## Stack
 - Frontend: React + Vite + TailwindCSS
 - Backend: Node.js + Express
