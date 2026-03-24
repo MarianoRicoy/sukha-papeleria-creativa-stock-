@@ -61,7 +61,7 @@ export default function Login() {
     }
 
     try {
-      const res = await fetch(`${API_URL}/auth/pin-check`, {
+      const res = await fetch(`${API_URL}/api/auth/pin-check`, {
         headers: { 'x-app-pin': value },
       })
 

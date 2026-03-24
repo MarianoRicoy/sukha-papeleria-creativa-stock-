@@ -69,6 +69,10 @@ function requirePin(req, res, next) {
 
 app.use('/api', requirePin);
 
+app.get('/api/auth/pin-check', (req, res) => {
+  return res.status(204).send();
+});
+
 app.patch('/api/config/pin', async (req, res) => {
   try {
     const { nuevo_pin } = req.body || {};
