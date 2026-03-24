@@ -2,11 +2,11 @@
   "rewrites": [
     {
       "source": "/auth/:path*",
-      "destination": "${RENDER_BACKEND_URL}/auth/:path*"
+      "destination": "https://sukha-papeleria-creativa-stock.onrender.com/auth/:path*"
     },
     {
       "source": "/api/:path*",
-      "destination": "${RENDER_BACKEND_URL}/api/:path*"
+      "destination": "https://sukha-papeleria-creativa-stock.onrender.com/api/:path*"
     }
   ]
 }
