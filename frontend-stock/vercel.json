@@ -1,8 +1,12 @@
 {
   "rewrites": [
     {
+      "source": "/auth/:path*",
+      "destination": "${RENDER_BACKEND_URL}/auth/:path*"
+    },
+    {
       "source": "/api/:path*",
-      "destination": "$RENDER_BACKEND_URL/api/:path*"
+      "destination": "${RENDER_BACKEND_URL}/api/:path*"
     }
   ]
 }
