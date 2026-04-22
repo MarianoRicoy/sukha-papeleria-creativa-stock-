@@ -396,7 +396,7 @@ app.post('/api/productos', async (req, res) => {
   }
 });
 
-app.patch('/api/productos/:codigo', async (req, res) => {
+app.put('/api/productos/:codigo', async (req, res) => {
   try {
     const { codigo } = req.params;
     if (!codigo || typeof codigo !== 'string') {
@@ -404,47 +404,40 @@ app.patch('/api/productos/:codigo', async (req, res) => {
     }
 
     const {
-      id_categoria,
       descripcion,
       precio_venta,
       costo,
-      stock_actual,
       stock_minimo,
-      imagen_url,
     } = req.body || {};
 
     const update = {};
 
-    if (id_categoria !== undefined) update.id_categoria = id_categoria;
-    if (descripcion !== undefined) update.descripcion = descripcion;
-    if (precio_venta !== undefined) update.precio_venta = precio_venta;
-    if (costo !== undefined) update.costo = costo;
-    if (stock_actual !== undefined) update.stock_actual = stock_actual;
-    if (stock_minimo !== undefined) update.stock_minimo = stock_minimo;
-    if (imagen_url !== undefined) update.imagen_url = imagen_url;
-
-    if (Object.keys(update).length === 0) {
-      return sendError(res, 400, 'No hay campos para actualizar');
+    if (descripcion !== undefined) update.descripcion = String(descripcion || '').trim() || null;
+    
+    if (precio_venta !== undefined) {
+      const p = Number(precio_venta);
+      update.precio_venta = Number.isFinite(p) ? p : null;
+    }
+    
+    if (costo !== undefined) {
+      const c = Number(costo);
+      update.costo = Number.isFinite(c) ? c : null;
     }
 
-    if (update.stock_actual !== undefined) {
-      const s = Number(update.stock_actual);
-      if (!Number.isFinite(s) || s < 0) {
-        return sendError(res, 400, 'stock_actual debe ser un número >= 0');
-      }
-      update.stock_actual = Math.trunc(s);
-    }
-
-    if (update.stock_minimo !== undefined) {
-      if (update.stock_minimo === null || update.stock_minimo === '') {
+    if (stock_minimo !== undefined) {
+      if (stock_minimo === null || stock_minimo === '') {
         update.stock_minimo = null;
       } else {
-        const smin = Number(update.stock_minimo);
+        const smin = Number(stock_minimo);
         if (!Number.isFinite(smin) || smin < 0) {
           return sendError(res, 400, 'stock_minimo debe ser un número >= 0');
         }
         update.stock_minimo = Math.trunc(smin);
       }
+    }
+
+    if (Object.keys(update).length === 0) {
+      return sendError(res, 400, 'No hay campos válidos para actualizar');
     }
 
     const { data, error } = await supabase

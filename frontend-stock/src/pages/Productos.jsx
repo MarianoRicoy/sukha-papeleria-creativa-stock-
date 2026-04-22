@@ -29,10 +29,41 @@ export default function Productos() {
   const [uploadPreviewByCodigo, setUploadPreviewByCodigo] = useState({})
   const [error, setError] = useState('')
 
+  const [editingCodigo, setEditingCodigo] = useState('')
+  const [editForm, setEditEditForm] = useState({ descripcion: '' })
+  const [savingCodigo, setSavingCodigo] = useState('')
+  const [successMsg, setSuccessMsg] = useState('')
+
   const [searchParams, setSearchParams] = useSearchParams()
 
   const qTrim = useMemo(() => q.trim(), [q])
   const inputRef = useRef(null)
+
+  useEffect(() => {
+    if (!successMsg) return
+    const id = setTimeout(() => setSuccessMsg(''), 3000)
+    return () => clearTimeout(id)
+  }, [successMsg])
+
+  async function guardarCambios(codigo) {
+    const c = String(codigo || '').trim()
+    if (!c) return
+    setError('')
+    setSavingCodigo(c)
+    try {
+      await apiJson(`/api/productos/${encodeURIComponent(c)}`, {
+        method: 'PUT',
+        body: { descripcion: editForm.descripcion },
+      })
+      setSuccessMsg('¡Descripción actualizada!')
+      setEditingCodigo('')
+      await cargar()
+    } catch (e) {
+      setError(e.message || 'No se pudo actualizar el producto')
+    } finally {
+      setSavingCodigo('')
+    }
+  }
 
   async function exportarCsv() {
     const query = qTrim
@@ -276,6 +307,16 @@ export default function Productos() {
           </div>
         ) : null}
 
+        {successMsg ? (
+          <div
+            role="alert"
+            aria-live="polite"
+            className="mt-4 rounded-lg border border-sukha-primary/30 bg-sukha-primary/10 px-3 py-2 text-sm text-sukha-ink font-medium animate-bounce"
+          >
+            {successMsg}
+          </div>
+        ) : null}
+
         <TableShell className="mt-4">
           <Table className="min-w-0">
             <THead>
@@ -320,9 +361,55 @@ export default function Productos() {
                     </TD>
                     <TD className="font-mono">{p.codigo}</TD>
                     <TD className="max-w-[220px] sm:max-w-none">
-                      <div className="truncate">
-                        {p.descripcion || <span className="text-sukha-ink/60">(sin descripción)</span>}
-                      </div>
+                      {editingCodigo === p.codigo ? (
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="text"
+                            autoFocus
+                            className="w-full rounded border border-sukha-peach/60 bg-white px-2 py-1 text-sm outline-none focus:border-sukha-primary"
+                            value={editForm.descripcion}
+                            onChange={(e) => setEditEditForm({ ...editForm, descripcion: e.target.value })}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') guardarCambios(p.codigo)
+                              if (e.key === 'Escape') setEditingCodigo('')
+                            }}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => guardarCambios(p.codigo)}
+                            disabled={savingCodigo === p.codigo}
+                            className="rounded-md bg-sukha-primary p-1 text-sukha-ink hover:brightness-95 disabled:opacity-50"
+                            title="Guardar"
+                          >
+                            {savingCodigo === p.codigo ? (
+                              <span className="block h-4 w-4 animate-spin rounded-full border-2 border-sukha-ink border-t-transparent" />
+                            ) : (
+                              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                              </svg>
+                            )}
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="group flex items-center gap-2">
+                          <div className="truncate" title={p.descripcion}>
+                            {p.descripcion || <span className="text-sukha-ink/60">(sin descripción)</span>}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingCodigo(p.codigo)
+                              setEditEditForm({ descripcion: p.descripcion || '' })
+                            }}
+                            className="invisible text-sukha-ink/40 hover:text-sukha-primary group-hover:visible"
+                            title="Editar descripción"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                              <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
+                            </svg>
+                          </button>
+                        </div>
+                      )}
                     </TD>
                     <TD>{formatMoneyAr(p.precio_venta)}</TD>
                     <TD className="font-semibold">
