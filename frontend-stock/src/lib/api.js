@@ -35,9 +35,16 @@ export async function apiFetch(path, options = {}) {
   const headers = new Headers(options.headers || {})
   if (pin) headers.set('x-app-pin', pin)
 
+  let { body } = options
+  if (body && typeof body === 'object' && !(body instanceof ArrayBuffer) && !(body instanceof Blob) && !(body instanceof FormData) && !(body instanceof URLSearchParams) && !(body instanceof ReadableStream) && !ArrayBuffer.isView(body)) {
+    body = JSON.stringify(body)
+    if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+  }
+
   const res = await fetch(`${API_URL}${path}`, {
     ...options,
     headers,
+    body,
   })
 
   if (res.status === 401) {
