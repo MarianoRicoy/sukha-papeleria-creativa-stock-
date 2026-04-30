@@ -649,6 +649,7 @@ app.post('/api/ventas', async (req, res) => {
       if (!p) {
         return sendError(res, 404, `Producto inexistente: ${item.codigo_producto}`);
       }
+      if (item.codigo_producto === CODIGO_PERSONALIZADO) continue;
       if (p.stock_actual != null && Number(p.stock_actual) < Number(item.cantidad)) {
         return sendError(res, 409, `Stock insuficiente para ${item.codigo_producto}`);
       }
