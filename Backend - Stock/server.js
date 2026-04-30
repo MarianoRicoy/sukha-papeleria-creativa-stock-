@@ -396,6 +396,36 @@ app.post('/api/productos', async (req, res) => {
   }
 });
 
+app.patch('/api/productos/:codigo/stock', async (req, res) => {
+  try {
+    const { codigo } = req.params;
+    const { nuevo_stock } = req.body || {};
+
+    if (nuevo_stock === undefined || nuevo_stock === null) {
+      return sendError(res, 400, 'nuevo_stock es obligatorio');
+    }
+
+    const s = Number(nuevo_stock);
+    if (!Number.isFinite(s) || s < 0) {
+      return sendError(res, 400, 'nuevo_stock debe ser un número >= 0');
+    }
+
+    const { data, error } = await supabase
+      .from('Productos')
+      .update({ stock_actual: Math.trunc(s) })
+      .eq('codigo', codigo)
+      .select('codigo, descripcion, precio_venta, costo, stock_actual, stock_minimo, imagen_url')
+      .maybeSingle();
+
+    if (error) return sendSupabaseError(res, error);
+    if (!data) return sendError(res, 404, 'Producto no encontrado');
+
+    return res.json(data);
+  } catch (e) {
+    return sendError(res, 500, e.message || 'Error inesperado');
+  }
+});
+
 app.put('/api/productos/:codigo', async (req, res) => {
   try {
     const { codigo } = req.params;

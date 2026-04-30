@@ -88,28 +88,16 @@ export default function AjustarStock() {
       return
     }
 
-    let sminPayload = null
-    const sminTrim = String(stockMinimo).trim()
-    if (sminTrim) {
-      const smin = Number(sminTrim)
-      if (!Number.isFinite(smin) || smin < 0) {
-        setError('Stock mínimo inválido')
-        return
-      }
-      sminPayload = Math.trunc(smin)
-    }
-
     setLoadingGuardar(true)
     try {
-      const updated = await apiJson(`/api/productos/${encodeURIComponent(producto.codigo)}`, {
+      const updated = await apiJson(`/api/productos/${encodeURIComponent(producto.codigo)}/stock`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stock_actual: Math.trunc(s), stock_minimo: sminPayload }),
+        body: { nuevo_stock: Math.trunc(s) },
       })
       setProducto(updated)
       setNuevoStock(String(updated?.stock_actual ?? ''))
       setStockMinimo(String(updated?.stock_minimo ?? ''))
-      setSuccess('Stock actualizado')
+      setSuccess('¡Stock actualizado con éxito!')
       codigoRef.current?.focus()
       codigoRef.current?.select?.()
     } catch (e) {
