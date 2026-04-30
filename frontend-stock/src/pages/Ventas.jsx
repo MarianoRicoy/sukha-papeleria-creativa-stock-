@@ -5,6 +5,8 @@ import PageShell, { GlassCard } from '../components/PageShell.jsx'
 import Button from '../components/ui/Button.jsx'
 import ProductoAutocomplete from '../components/ProductoAutocomplete.jsx'
 
+const CODIGO_PERSONALIZADO = '999'
+
 function formatMoneyAr(value) {
   const n = Number(value)
   if (!Number.isFinite(n)) return ''
@@ -25,10 +27,15 @@ export default function Ventas() {
   const [error, setError] = useState('')
   const [errorKind, setErrorKind] = useState('')
   const [success, setSuccess] = useState('')
+  const [descripcionCustom, setDescripcionCustom] = useState('')
+  const [precioCustom, setPrecioCustom] = useState('')
 
   const codigoRef = useRef(null)
   const busquedaRef = useRef(null)
   const cantidadRef = useRef(null)
+  const descCustomRef = useRef(null)
+
+  const esPersonalizado = producto?.codigo === CODIGO_PERSONALIZADO
   const codigoTrim = useMemo(() => codigo.trim(), [codigo])
 
   useEffect(() => {
@@ -61,11 +68,19 @@ export default function Ventas() {
       const data = await apiJsonCached(path, {}, { ttlMs: 2000, key: `ventas_codigo:${c}` })
       setProducto({ codigo: c, ...data })
       setCantidad(1)
+      if (c === CODIGO_PERSONALIZADO) {
+        setDescripcionCustom('')
+        setPrecioCustom('')
+      }
 
       if (focusCantidad) {
         requestAnimationFrame(() => {
-          cantidadRef.current?.focus()
-          cantidadRef.current?.select?.()
+          if (c === CODIGO_PERSONALIZADO) {
+            descCustomRef.current?.focus()
+          } else {
+            cantidadRef.current?.focus()
+            cantidadRef.current?.select?.()
+          }
         })
       }
     } catch (e) {
@@ -120,7 +135,21 @@ export default function Ventas() {
       return
     }
 
-    if (producto?.stock_actual != null && Number(producto.stock_actual) < cant) {
+    if (esPersonalizado) {
+      if (!descripcionCustom.trim()) {
+        setError('Ingresá una descripción para el trabajo personalizado')
+        setErrorKind('warning')
+        return
+      }
+      const pc = Number(precioCustom)
+      if (!Number.isFinite(pc) || pc <= 0) {
+        setError('Ingresá un precio válido para el trabajo personalizado')
+        setErrorKind('warning')
+        return
+      }
+    }
+
+    if (!esPersonalizado && producto?.stock_actual != null && Number(producto.stock_actual) < cant) {
       setError(`Stock insuficiente. Disponible: ${producto.stock_actual}`)
       setErrorKind('warning')
       return
@@ -128,12 +157,16 @@ export default function Ventas() {
 
     setLoadingVenta(true)
     try {
+      const item = { codigo_producto: producto.codigo, cantidad: cant }
+      if (esPersonalizado) {
+        item.descripcion_custom = descripcionCustom.trim()
+        item.precio_historico = Number(precioCustom)
+        item.costo_historico = 0
+      }
+
       const data = await apiJson(`/api/ventas`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          items: [{ codigo_producto: producto.codigo, cantidad: cant }],
-        }),
+        body: { items: [item] },
       })
 
       setSuccess(
@@ -142,6 +175,8 @@ export default function Ventas() {
         )}`
       )
 
+      setDescripcionCustom('')
+      setPrecioCustom('')
       await buscarProducto(producto.codigo, { focusCantidad: false })
       codigoRef.current?.focus()
       codigoRef.current?.select?.()
@@ -222,6 +257,8 @@ export default function Ventas() {
                   setProducto(null)
                   setError('')
                   setSuccess('')
+                  setDescripcionCustom('')
+                  setPrecioCustom('')
                   codigoRef.current?.focus()
                 }}
               >
@@ -305,7 +342,9 @@ export default function Ventas() {
                       <div className="font-semibold">
                         {producto.codigo} - {producto.descripcion || '(sin descripción)'}
                       </div>
-                      <div className="text-sukha-ink/70">Precio: {formatMoneyAr(producto.precio_venta)}</div>
+                      {!esPersonalizado && (
+                        <div className="text-sukha-ink/70">Precio: {formatMoneyAr(producto.precio_venta)}</div>
+                      )}
                     </div>
                   </div>
                 ) : (
@@ -316,10 +355,62 @@ export default function Ventas() {
             <div>
               <div className="text-xs font-semibold uppercase tracking-wide text-sukha-ink/60">Stock</div>
               <div className="mt-1 text-sm text-sukha-ink">
-                {producto ? <div className="font-semibold">{producto.stock_actual}</div> : <div className="text-sukha-ink/70">—</div>}
+                {producto
+                  ? esPersonalizado
+                    ? <div className="text-sukha-ink/50 italic">N/A</div>
+                    : <div className="font-semibold">{producto.stock_actual ?? '—'}</div>
+                  : <div className="text-sukha-ink/70">—</div>}
               </div>
             </div>
           </div>
+
+          {esPersonalizado && (
+            <div className="mt-4 rounded-lg border border-sukha-primary/30 bg-sukha-primary/10 p-3">
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-sukha-ink/70">
+                Datos del trabajo personalizado
+              </div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="block text-sm font-medium text-sukha-ink/80">Descripción</label>
+                  <input
+                    ref={descCustomRef}
+                    value={descripcionCustom}
+                    onChange={(e) => setDescripcionCustom(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        cantidadRef.current?.focus()
+                        cantidadRef.current?.select?.()
+                      }
+                    }}
+                    className="mt-1 w-full rounded-lg border border-sukha-primary/40 bg-white/70 px-3 py-2 outline-none focus:border-sukha-primary"
+                    placeholder='Ej: "Libros Principito"'
+                    maxLength={200}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-sukha-ink/80">Precio cobrado ($)</label>
+                  <input
+                    value={precioCustom}
+                    onChange={(e) => setPrecioCustom(e.target.value)}
+                    onWheel={preventWheelNumberChange}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        cantidadRef.current?.focus()
+                        cantidadRef.current?.select?.()
+                      }
+                    }}
+                    className="mt-1 w-full rounded-lg border border-sukha-primary/40 bg-white/70 px-3 py-2 outline-none focus:border-sukha-primary"
+                    type="number"
+                    min="0"
+                    step="1"
+                    placeholder="Ej: 5000"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="mt-4 text-xs text-sukha-ink/60">PIN activo</div>

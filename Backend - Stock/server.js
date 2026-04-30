@@ -610,6 +610,8 @@ function parseMesAnio({ mes, anio }) {
   };
 }
 
+const CODIGO_PERSONALIZADO = '999';
+
 app.post('/api/ventas', async (req, res) => {
   try {
     const { items, fecha } = req.body || {};
@@ -654,12 +656,16 @@ app.post('/api/ventas', async (req, res) => {
 
     const detallePayload = items.map((item) => {
       const p = productosByCodigo.get(item.codigo_producto);
-      return {
+      const row = {
         codigo_producto: item.codigo_producto,
         cantidad: Number(item.cantidad),
         precio_historico: item.precio_historico ?? p.precio_venta ?? null,
         costo_historico: item.costo_historico ?? p.costo ?? null,
       };
+      if (item.codigo_producto === CODIGO_PERSONALIZADO && item.descripcion_custom) {
+        row.descripcion_custom = String(item.descripcion_custom).trim().slice(0, 200);
+      }
+      return row;
     });
 
     const totalFacturado = detallePayload.reduce((acc, d) => {
@@ -691,7 +697,9 @@ app.post('/api/ventas', async (req, res) => {
     if (detalleError) return sendSupabaseError(res, detalleError);
 
     for (const item of items) {
+      if (item.codigo_producto === CODIGO_PERSONALIZADO) continue;
       const p = productosByCodigo.get(item.codigo_producto);
+      if (p.stock_actual == null) continue;
       const newStock = (Number(p.stock_actual) || 0) - Number(item.cantidad);
 
       const { error: updateError } = await supabase
