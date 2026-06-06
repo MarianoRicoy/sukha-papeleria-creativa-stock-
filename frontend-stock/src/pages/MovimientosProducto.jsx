@@ -4,6 +4,7 @@ import { Link, useParams } from 'react-router-dom'
 import { apiJson } from '../lib/api.js'
 import PageShell, { GlassCard } from '../components/PageShell.jsx'
 import { Table, TableShell, TBody, TD, TH, THead, TR } from '../components/ui/TableShell.jsx'
+import ImageLightbox from '../components/ImageLightbox.jsx'
 
 function formatMoneyAr(value) {
   const n = Number(value)
@@ -33,6 +34,7 @@ export default function MovimientosProducto() {
   const [error, setError] = useState('')
   const [producto, setProducto] = useState(null)
   const [movimientos, setMovimientos] = useState([])
+  const [lightbox, setLightbox] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -91,8 +93,9 @@ export default function MovimientosProducto() {
                       <img
                         src={producto.imagen_url}
                         alt={producto.descripcion || producto.codigo}
-                        className="h-12 w-12 rounded-xl border border-sukha-peach/50 bg-white/40 object-cover"
+                        className="h-12 w-12 cursor-pointer rounded-xl border border-sukha-peach/50 bg-white/40 object-cover transition hover:brightness-90 hover:shadow-md"
                         loading="lazy"
+                        onClick={() => setLightbox({ src: producto.imagen_url, alt: producto.descripcion || producto.codigo })}
                       />
                     ) : null}
                     <div>
@@ -191,6 +194,10 @@ export default function MovimientosProducto() {
           </Table>
         </TableShell>
       </GlassCard>
+
+      {lightbox ? (
+        <ImageLightbox src={lightbox.src} alt={lightbox.alt} onClose={() => setLightbox(null)} />
+      ) : null}
     </PageShell>
   )
 }

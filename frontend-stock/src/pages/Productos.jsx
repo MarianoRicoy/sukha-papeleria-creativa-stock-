@@ -6,6 +6,7 @@ import PageShell, { GlassCard } from '../components/PageShell.jsx'
 import Button from '../components/ui/Button.jsx'
 import { Table, TableShell, TBody, TD, TH, THead, TR } from '../components/ui/TableShell.jsx'
 import ProductoAutocomplete from '../components/ProductoAutocomplete.jsx'
+import ImageLightbox from '../components/ImageLightbox.jsx'
 
 function formatMoneyAr(value) {
   const n = Number(value)
@@ -33,6 +34,8 @@ export default function Productos() {
   const [editForm, setEditEditForm] = useState({ descripcion: '' })
   const [savingCodigo, setSavingCodigo] = useState('')
   const [successMsg, setSuccessMsg] = useState('')
+
+  const [lightbox, setLightbox] = useState(null)
 
   const [searchParams, setSearchParams] = useSearchParams()
 
@@ -351,8 +354,9 @@ export default function Productos() {
                           <img
                             src={p.imagen_url}
                             alt={p.descripcion || p.codigo}
-                            className="h-10 w-10 rounded-lg border border-sukha-peach/50 bg-white/40 object-cover"
+                            className="h-10 w-10 cursor-pointer rounded-lg border border-sukha-peach/50 bg-white/40 object-cover transition hover:brightness-90 hover:shadow-md"
                             loading="lazy"
+                            onClick={() => setLightbox({ src: p.imagen_url, alt: p.descripcion || p.codigo })}
                           />
                         ) : (
                           <div className="h-10 w-10 rounded-lg border border-sukha-peach/40 bg-white/30" />
@@ -513,6 +517,10 @@ export default function Productos() {
           </Table>
         </TableShell>
       </GlassCard>
+
+      {lightbox ? (
+        <ImageLightbox src={lightbox.src} alt={lightbox.alt} onClose={() => setLightbox(null)} />
+      ) : null}
     </PageShell>
   )
 }

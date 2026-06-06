@@ -13,6 +13,12 @@ export default {
           ink: '#1F1F1F',
         },
       },
+      keyframes: {
+        fadeIn: {
+          from: { opacity: '0' },
+          to: { opacity: '1' },
+        },
+      },
     },
   },
   plugins: [],
