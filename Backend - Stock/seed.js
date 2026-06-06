@@ -1,10 +1,9 @@
 /*
-  Seed para Supabase - SUKHA Papelería Creativa
+  Seed para Neon Postgres - SUKHA Papelería Creativa
 
   Cómo ejecutar:
   1) En /Backend - Stock creá un .env con:
-       SUPABASE_URL=...
-       SUPABASE_KEY=...   (service role recomendado para inserts)
+       DATABASE_URL=postgresql://...
   2) npm install
   3) node seed.js
 
@@ -14,39 +13,27 @@
       - codigo corto secuencial ("01", "02", ...)
       - precio_venta=0, costo=0, stock_actual=0
       - id_categoria según la categoría correspondiente
-
-  Nota:
-  - Asume que "Categorias" tiene una columna "nombre" (UNIQUE recomendado).
-  - Si en tu schema el campo se llama distinto, ajustá CATEGORY_NAME_COLUMN.
 */
 
-import 'dotenv/config'
-import { createClient } from '@supabase/supabase-js'
+require('dotenv').config();
+const { Pool } = require('pg');
 
-const SUPABASE_URL = process.env.SUPABASE_URL
-const SUPABASE_KEY = process.env.SUPABASE_KEY
+const DATABASE_URL = process.env.DATABASE_URL;
 
-if (!SUPABASE_URL || !SUPABASE_KEY) {
-  console.error('Faltan variables de entorno. Configurá SUPABASE_URL y SUPABASE_KEY en .env')
-  process.exit(1)
+if (!DATABASE_URL) {
+  console.error('Falta la variable de entorno DATABASE_URL en .env');
+  process.exit(1);
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: true,
+});
 
-const CATEGORIES_TABLE = 'Categorias'
-const PRODUCTS_TABLE = 'Productos'
-const SALES_DETAIL_TABLE = 'Detalle_Ventas'
-const STOCK_INGRESOS_TABLE = 'Ingresos_Stock'
-
-// Ajustar si tu columna no se llama "nombre"
-const CATEGORY_NAME_COLUMN = 'nombre'
-// Ajustar si tu PK no se llama "id_categoria"
-const CATEGORY_ID_COLUMN = 'id_categoria'
-
-const CLEAN_TEST_PRODUCTS = String(process.env.CLEAN_TEST_PRODUCTS || '').toLowerCase() === 'true'
+const CLEAN_TEST_PRODUCTS = String(process.env.CLEAN_TEST_PRODUCTS || '').toLowerCase() === 'true';
 
 function padCode(n, width) {
-  return String(n).padStart(width, '0')
+  return String(n).padStart(width, '0');
 }
 
 function buildCatalog() {
@@ -167,123 +154,99 @@ function buildCatalog() {
         'vinilos',
       ],
     },
-  ]
+  ];
 }
 
 async function upsertCategories(categoryNames) {
-  const uniqueNames = Array.from(new Set(categoryNames.map((n) => String(n || '').trim()).filter(Boolean)))
+  const uniqueNames = Array.from(new Set(categoryNames.map((n) => String(n || '').trim()).filter(Boolean)));
 
-  const { data: existing, error: existingError } = await supabase
-    .from(CATEGORIES_TABLE)
-    .select(`${CATEGORY_ID_COLUMN}, ${CATEGORY_NAME_COLUMN}`)
-    .in(CATEGORY_NAME_COLUMN, uniqueNames)
-
-  if (existingError) throw existingError
-
-  const existingSet = new Set((existing || []).map((r) => r?.[CATEGORY_NAME_COLUMN]))
-  const missing = uniqueNames.filter((n) => !existingSet.has(n))
-
-  if (missing.length > 0) {
-    const payload = missing.map((name) => ({ [CATEGORY_NAME_COLUMN]: name }))
-    const { error: insertError } = await supabase.from(CATEGORIES_TABLE).insert(payload)
-    if (insertError) throw insertError
+  for (const name of uniqueNames) {
+    await pool.query(
+      `INSERT INTO "Categorias" (nombre) VALUES ($1)
+       ON CONFLICT (nombre) DO NOTHING`,
+      [name],
+    );
   }
 
-  const { data: allRows, error: allError } = await supabase
-    .from(CATEGORIES_TABLE)
-    .select(`${CATEGORY_ID_COLUMN}, ${CATEGORY_NAME_COLUMN}`)
-    .in(CATEGORY_NAME_COLUMN, uniqueNames)
+  const { rows } = await pool.query(
+    'SELECT id_categoria, nombre FROM "Categorias" WHERE nombre = ANY($1)',
+    [uniqueNames],
+  );
 
-  if (allError) throw allError
-
-  const map = new Map()
-  for (const row of allRows || []) {
-    const name = row?.[CATEGORY_NAME_COLUMN]
-    if (!map.has(name)) map.set(name, row?.[CATEGORY_ID_COLUMN])
+  const map = new Map();
+  for (const row of rows) {
+    if (!map.has(row.nombre)) map.set(row.nombre, row.id_categoria);
   }
-
-  return map
+  return map;
 }
 
 async function upsertProducts(products) {
   for (const p of products) {
-    const codigo = String(p?.codigo || '').trim()
-    if (!codigo) continue
+    const codigo = String(p?.codigo || '').trim();
+    if (!codigo) continue;
 
-    const updatePayload = {
-      id_categoria: p.id_categoria ?? null,
-      descripcion: p.descripcion ?? null,
-      precio_venta: p.precio_venta ?? 0,
-      costo: p.costo ?? 0,
-      stock_actual: p.stock_actual ?? 0,
-    }
-
-    const { data: updated, error: updateError } = await supabase
-      .from(PRODUCTS_TABLE)
-      .update(updatePayload)
-      .eq('codigo', codigo)
-      .select('codigo')
-
-    if (updateError) throw updateError
-
-    if (!updated || updated.length === 0) {
-      const { error: insertError } = await supabase.from(PRODUCTS_TABLE).insert({ codigo, ...updatePayload })
-      if (insertError) throw insertError
-    }
+    await pool.query(
+      `INSERT INTO "Productos" (codigo, id_categoria, descripcion, precio_venta, costo, stock_actual)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (codigo) DO UPDATE SET
+         id_categoria  = EXCLUDED.id_categoria,
+         descripcion   = EXCLUDED.descripcion,
+         precio_venta  = EXCLUDED.precio_venta,
+         costo         = EXCLUDED.costo,
+         stock_actual  = EXCLUDED.stock_actual`,
+      [
+        codigo,
+        p.id_categoria ?? null,
+        p.descripcion ?? null,
+        p.precio_venta ?? 0,
+        p.costo ?? 0,
+        p.stock_actual ?? 0,
+      ],
+    );
   }
 }
 
 async function deleteTestProducts() {
-  const { data: rows, error: selectError } = await supabase
-    .from(PRODUCTS_TABLE)
-    .select('codigo', { count: 'exact' })
-    .is('id_categoria', null)
+  const { rows } = await pool.query(
+    'SELECT codigo FROM "Productos" WHERE id_categoria IS NULL',
+  );
 
-  if (selectError) throw selectError
+  const codes = rows.map((r) => String(r?.codigo || '').trim()).filter(Boolean);
+  if (codes.length === 0) return 0;
 
-  const codes = (rows || []).map((r) => String(r?.codigo || '').trim()).filter(Boolean)
-  const count = codes.length
-  if (count === 0) return 0
+  await pool.query(
+    'DELETE FROM "Detalle_Ventas" WHERE codigo_producto = ANY($1)',
+    [codes],
+  );
 
-  // Borra primero referencias para evitar violaciones de FK.
-  // Solo afecta a productos de prueba (id_categoria IS NULL).
-  const { error: deleteDetailError } = await supabase
-    .from(SALES_DETAIL_TABLE)
-    .delete()
-    .in('codigo_producto', codes)
-  if (deleteDetailError) throw deleteDetailError
+  await pool.query(
+    'DELETE FROM "Ingresos_Stock" WHERE codigo_producto = ANY($1)',
+    [codes],
+  );
 
-  const { error: deleteIngresosError } = await supabase
-    .from(STOCK_INGRESOS_TABLE)
-    .delete()
-    .in('codigo_producto', codes)
-  if (deleteIngresosError) throw deleteIngresosError
+  await pool.query(
+    'DELETE FROM "Productos" WHERE id_categoria IS NULL',
+  );
 
-  const { error: deleteError } = await supabase
-    .from(PRODUCTS_TABLE)
-    .delete()
-    .is('id_categoria', null)
-
-  if (deleteError) throw deleteError
-  return count
+  return codes.length;
 }
 
 async function main() {
-  const catalog = buildCatalog()
-  const categoryNames = catalog.map((c) => c.categoria)
+  const catalog = buildCatalog();
+  const categoryNames = catalog.map((c) => c.categoria);
 
   if (CLEAN_TEST_PRODUCTS) {
-    console.log('CLEAN_TEST_PRODUCTS=true → borrando productos de prueba (id_categoria IS NULL)...')
-    const deleted = await deleteTestProducts()
-    console.log(`Productos de prueba eliminados: ${deleted}`)
+    console.log('CLEAN_TEST_PRODUCTS=true → borrando productos de prueba (id_categoria IS NULL)...');
+    const deleted = await deleteTestProducts();
+    console.log(`Productos de prueba eliminados: ${deleted}`);
   }
 
-  console.log(`Seedeando ${categoryNames.length} categorías...`)
-  const categoryIdByName = await upsertCategories(categoryNames)
+  console.log(`Seedeando ${categoryNames.length} categorías...`);
+  const categoryIdByName = await upsertCategories(categoryNames);
 
-  const flatProducts = []
+  const flatProducts = [];
   for (const group of catalog) {
-    const id_categoria = categoryIdByName.get(group.categoria) ?? null
+    const id_categoria = categoryIdByName.get(group.categoria) ?? null;
     for (const descripcion of group.productos) {
       flatProducts.push({
         id_categoria,
@@ -291,23 +254,25 @@ async function main() {
         precio_venta: 0,
         costo: 0,
         stock_actual: 0,
-      })
+      });
     }
   }
 
-  const width = Math.max(2, String(flatProducts.length).length)
+  const width = Math.max(2, String(flatProducts.length).length);
   const productsPayload = flatProducts.map((p, idx) => ({
     codigo: padCode(idx + 1, width),
     ...p,
-  }))
+  }));
 
-  console.log(`Seedeando ${productsPayload.length} productos...`)
-  await upsertProducts(productsPayload)
+  console.log(`Seedeando ${productsPayload.length} productos...`);
+  await upsertProducts(productsPayload);
 
-  console.log('Seed finalizado OK.')
+  console.log('Seed finalizado OK.');
+  await pool.end();
 }
 
-main().catch((err) => {
-  console.error('Seed falló:', err?.message || err)
-  process.exit(1)
-})
+main().catch(async (err) => {
+  console.error('Seed falló:', err?.message || err);
+  await pool.end().catch(() => {});
+  process.exit(1);
+});

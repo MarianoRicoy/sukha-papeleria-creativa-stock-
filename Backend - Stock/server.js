@@ -1,13 +1,28 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { createClient } = require('@supabase/supabase-js');
+const { Pool } = require('pg');
+const { v2: cloudinary } = require('cloudinary');
 const fs = require('fs');
 const path = require('path');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+/* ------------------------------------------------------------------ */
+/*  Cloudinary                                                         */
+/* ------------------------------------------------------------------ */
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+/* ------------------------------------------------------------------ */
+/*  PIN authentication                                                 */
+/* ------------------------------------------------------------------ */
 
 const pinFilePath = path.join(__dirname, 'app_pin.json');
 
@@ -90,6 +105,28 @@ app.patch('/api/config/pin', async (req, res) => {
   }
 });
 
+/* ------------------------------------------------------------------ */
+/*  Helpers                                                            */
+/* ------------------------------------------------------------------ */
+
+function sendError(res, status, message) {
+  return res.status(status).json({ error: message });
+}
+
+function mapPgErrorToStatus(error) {
+  const code = error?.code;
+  if (code === '23505') return 409;
+  if (code === '23503') return 409;
+  if (code === '22P02') return 400;
+  return 500;
+}
+
+function sendDbError(res, error) {
+  const status = error?.code ? mapPgErrorToStatus(error) : 500;
+  const message = error?.message || 'Error inesperado';
+  return sendError(res, status, message);
+}
+
 function guessImageExtension(contentType) {
   const ct = String(contentType || '').toLowerCase().split(';')[0].trim();
   if (ct === 'image/jpeg' || ct === 'image/jpg') return 'jpg';
@@ -99,18 +136,54 @@ function guessImageExtension(contentType) {
   return '';
 }
 
-function extractStorageObjectPathFromPublicUrl(publicUrl, bucket) {
+/* ------------------------------------------------------------------ */
+/*  Conexión a Neon Postgres (pooler)                                  */
+/* ------------------------------------------------------------------ */
+
+const databaseUrl = process.env.DATABASE_URL;
+
+if (!databaseUrl) {
+  console.error('Falta la variable de entorno DATABASE_URL en el archivo .env');
+  process.exit(1);
+}
+
+const pool = new Pool({
+  connectionString: databaseUrl,
+  ssl: true,
+  max: 10,
+});
+
+pool.on('error', (err) => {
+  console.error('Error inesperado en el pool de Postgres:', err.message);
+});
+
+/* ------------------------------------------------------------------ */
+/*  Imagen de producto — upload / delete (Cloudinary)                  */
+/* ------------------------------------------------------------------ */
+
+function cloudinaryPublicId(url) {
+  if (!url) return null;
   try {
-    const u = new URL(String(publicUrl || ''));
-    const marker = `/storage/v1/object/public/${encodeURIComponent(bucket)}/`;
-    const idx = u.pathname.indexOf(marker);
-    if (idx === -1) return null;
-    const raw = u.pathname.slice(idx + marker.length);
-    if (!raw) return null;
-    return decodeURIComponent(raw);
+    const parts = new URL(url).pathname.split('/');
+    const uploadIdx = parts.indexOf('upload');
+    if (uploadIdx === -1) return null;
+    const afterVersion = parts.slice(uploadIdx + 2);
+    const last = afterVersion[afterVersion.length - 1];
+    afterVersion[afterVersion.length - 1] = last.replace(/\.[^.]+$/, '');
+    return afterVersion.join('/');
   } catch {
     return null;
   }
+}
+
+function uploadToCloudinary(buffer, folder) {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { folder, resource_type: 'image' },
+      (err, result) => (err ? reject(err) : resolve(result)),
+    );
+    stream.end(buffer);
+  });
 }
 
 app.put(
@@ -123,14 +196,13 @@ app.put(
         return sendError(res, 400, 'Código inválido');
       }
 
-      const { data: prod, error: getErr } = await supabase
-        .from('Productos')
-        .select('codigo, imagen_url')
-        .eq('codigo', codigo)
-        .maybeSingle();
+      const { rows } = await pool.query(
+        'SELECT codigo, imagen_url FROM "Productos" WHERE codigo = $1',
+        [codigo],
+      );
 
-      if (getErr) return sendSupabaseError(res, getErr);
-      if (!prod) return sendError(res, 404, 'Producto no encontrado');
+      if (rows.length === 0) return sendError(res, 404, 'Producto no encontrado');
+      const prod = rows[0];
 
       const buf = req.body;
       if (!buf || !(buf instanceof Buffer) || buf.length === 0) {
@@ -142,41 +214,28 @@ app.put(
         return sendError(res, 400, 'Formato no soportado (usar JPG/PNG/WEBP/GIF)');
       }
 
-      const objectPath = `productos/${encodeURIComponent(codigo)}/${Date.now()}.${ext}`;
+      const result = await uploadToCloudinary(buf, `sukha/productos/${codigo}`);
+      const publicUrl = result.secure_url;
 
-      const uploadRes = await supabase.storage
-        .from(supabaseProductImagesBucket)
-        .upload(objectPath, buf, {
-          contentType: `image/${ext === 'jpg' ? 'jpeg' : ext}`,
-          upsert: true,
-        });
+      const { rows: updated } = await pool.query(
+        `UPDATE "Productos" SET imagen_url = $1 WHERE codigo = $2
+         RETURNING codigo, imagen_url`,
+        [publicUrl, codigo],
+      );
 
-      if (uploadRes.error) return sendSupabaseError(res, uploadRes.error);
+      if (updated.length === 0) return sendError(res, 404, 'Producto no encontrado');
 
-      const publicUrlRes = supabase.storage.from(supabaseProductImagesBucket).getPublicUrl(objectPath);
-      const publicUrl = publicUrlRes?.data?.publicUrl || '';
-      if (!publicUrl) return sendError(res, 500, 'No se pudo obtener la URL pública');
-
-      const { data, error } = await supabase
-        .from('Productos')
-        .update({ imagen_url: publicUrl })
-        .eq('codigo', codigo)
-        .select('codigo, imagen_url')
-        .maybeSingle();
-
-      if (error) return sendSupabaseError(res, error);
-      if (!data) return sendError(res, 404, 'Producto no encontrado');
-
-      const previousPath = extractStorageObjectPathFromPublicUrl(prod?.imagen_url, supabaseProductImagesBucket);
-      if (previousPath) {
-        await supabase.storage.from(supabaseProductImagesBucket).remove([previousPath]);
+      const oldPublicId = cloudinaryPublicId(prod.imagen_url);
+      if (oldPublicId) {
+        await cloudinary.uploader.destroy(oldPublicId).catch(() => {});
       }
 
-      return res.json(data);
+      return res.json(updated[0]);
     } catch (e) {
+      if (e.code) return sendDbError(res, e);
       return sendError(res, 500, e.message || 'Error inesperado');
     }
-  }
+  },
 );
 
 app.delete('/api/productos/:codigo/imagen', async (req, res) => {
@@ -186,64 +245,42 @@ app.delete('/api/productos/:codigo/imagen', async (req, res) => {
       return sendError(res, 400, 'Código inválido');
     }
 
-    const { data: prod, error: getErr } = await supabase
-      .from('Productos')
-      .select('codigo, imagen_url')
-      .eq('codigo', codigo)
-      .maybeSingle();
+    const { rows } = await pool.query(
+      'SELECT codigo, imagen_url FROM "Productos" WHERE codigo = $1',
+      [codigo],
+    );
 
-    if (getErr) return sendSupabaseError(res, getErr);
-    if (!prod) return sendError(res, 404, 'Producto no encontrado');
+    if (rows.length === 0) return sendError(res, 404, 'Producto no encontrado');
+    const prod = rows[0];
 
-    const { error: updErr } = await supabase.from('Productos').update({ imagen_url: null }).eq('codigo', codigo);
-    if (updErr) return sendSupabaseError(res, updErr);
+    await pool.query(
+      'UPDATE "Productos" SET imagen_url = NULL WHERE codigo = $1',
+      [codigo],
+    );
 
-    const objectPath = extractStorageObjectPathFromPublicUrl(prod?.imagen_url, supabaseProductImagesBucket);
-    if (objectPath) {
-      await supabase.storage.from(supabaseProductImagesBucket).remove([objectPath]);
+    const oldPublicId = cloudinaryPublicId(prod.imagen_url);
+    if (oldPublicId) {
+      await cloudinary.uploader.destroy(oldPublicId).catch(() => {});
     }
 
     return res.status(204).send();
   } catch (e) {
+    if (e.code) return sendDbError(res, e);
     return sendError(res, 500, e.message || 'Error inesperado');
   }
 });
 
-function sendError(res, status, message) {
-  return res.status(status).json({ error: message });
-}
-
-function mapSupabaseErrorToStatus(error) {
-  const code = error?.code;
-
-  if (code === '23505') return 409;
-  if (code === '23503') return 409;
-  if (code === '22P02') return 400;
-  if (code === 'PGRST116') return 404;
-
-  return 500;
-}
-
-function sendSupabaseError(res, error, fallbackStatus = 500) {
-  const status = error?.code ? mapSupabaseErrorToStatus(error) : fallbackStatus;
-  const message = error?.message || 'Error inesperado';
-  return sendError(res, status, message);
-}
-
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_KEY;
-const supabaseProductImagesBucket = process.env.SUPABASE_PRODUCT_IMAGES_BUCKET || 'product-images';
-
-if (!supabaseUrl || !supabaseKey) {
-  console.error('Faltan variables de entorno. Configurá SUPABASE_URL y SUPABASE_KEY en el archivo .env');
-  process.exit(1);
-}
-
-const supabase = createClient(supabaseUrl, supabaseKey);
+/* ------------------------------------------------------------------ */
+/*  Health check                                                       */
+/* ------------------------------------------------------------------ */
 
 app.get('/', (req, res) => {
   res.send('Servidor de control de stock funcionando correctamente');
 });
+
+/* ------------------------------------------------------------------ */
+/*  Productos CRUD                                                     */
+/* ------------------------------------------------------------------ */
 
 app.get('/api/productos', async (req, res) => {
   try {
@@ -251,21 +288,30 @@ app.get('/api/productos', async (req, res) => {
     const limitRaw = typeof req.query.limit === 'string' ? Number(req.query.limit) : null;
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, Math.trunc(limitRaw))) : 50;
 
-    let query = supabase
-      .from('Productos')
-      .select('codigo, descripcion, precio_venta, costo, stock_actual, stock_minimo, imagen_url')
-      .order('codigo', { ascending: true })
-      .limit(limit);
+    let text;
+    let params;
 
     if (q) {
       const escaped = q.replace(/%/g, '\\%').replace(/_/g, '\\_');
-      query = query.or(`codigo.ilike.%${escaped}%,descripcion.ilike.%${escaped}%`);
+      const pattern = `%${escaped}%`;
+      text = `SELECT codigo, descripcion, precio_venta, costo, stock_actual, stock_minimo, imagen_url
+              FROM "Productos"
+              WHERE codigo ILIKE $1 OR descripcion ILIKE $1
+              ORDER BY codigo ASC
+              LIMIT $2`;
+      params = [pattern, limit];
+    } else {
+      text = `SELECT codigo, descripcion, precio_venta, costo, stock_actual, stock_minimo, imagen_url
+              FROM "Productos"
+              ORDER BY codigo ASC
+              LIMIT $1`;
+      params = [limit];
     }
 
-    const { data, error } = await query;
-    if (error) return sendSupabaseError(res, error);
-    return res.json({ items: data || [] });
+    const { rows } = await pool.query(text, params);
+    return res.json({ items: rows });
   } catch (e) {
+    if (e.code) return sendDbError(res, e);
     return sendError(res, 500, e.message || 'Error inesperado');
   }
 });
@@ -283,20 +329,26 @@ app.get('/api/productos/export.csv', async (req, res) => {
   try {
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
 
-    let query = supabase
-      .from('Productos')
-      .select('codigo, descripcion, precio_venta, costo, stock_actual, stock_minimo, imagen_url')
-      .order('codigo', { ascending: true });
+    let text;
+    let params;
 
     if (q) {
       const escaped = q.replace(/%/g, '\\%').replace(/_/g, '\\_');
-      query = query.or(`codigo.ilike.%${escaped}%,descripcion.ilike.%${escaped}%`);
+      const pattern = `%${escaped}%`;
+      text = `SELECT codigo, descripcion, precio_venta, costo, stock_actual, stock_minimo, imagen_url
+              FROM "Productos"
+              WHERE codigo ILIKE $1 OR descripcion ILIKE $1
+              ORDER BY codigo ASC`;
+      params = [pattern];
+    } else {
+      text = `SELECT codigo, descripcion, precio_venta, costo, stock_actual, stock_minimo, imagen_url
+              FROM "Productos"
+              ORDER BY codigo ASC`;
+      params = [];
     }
 
-    const { data, error } = await query;
-    if (error) return sendSupabaseError(res, error);
+    const { rows } = await pool.query(text, params);
 
-    const rows = Array.isArray(data) ? data : [];
     const sep = ';';
     const header = ['Código', 'Descripción', 'Precio venta', 'Costo', 'Stock actual', 'Stock mínimo', 'Imagen'];
 
@@ -312,7 +364,7 @@ app.get('/api/productos/export.csv', async (req, res) => {
           csvEscape(r.stock_actual),
           csvEscape(r.stock_minimo),
           csvEscape(r.imagen_url),
-        ].join(sep)
+        ].join(sep),
       );
     }
 
@@ -324,6 +376,7 @@ app.get('/api/productos/export.csv', async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     return res.status(200).send(csv);
   } catch (e) {
+    if (e.code) return sendDbError(res, e);
     return sendError(res, 500, e.message || 'Error inesperado');
   }
 });
@@ -332,17 +385,17 @@ app.get('/api/productos/:codigo', async (req, res) => {
   try {
     const { codigo } = req.params;
 
-    const { data, error } = await supabase
-      .from('Productos')
-      .select('codigo, descripcion, precio_venta, stock_actual, stock_minimo, imagen_url')
-      .eq('codigo', codigo)
-      .maybeSingle();
+    const { rows } = await pool.query(
+      `SELECT codigo, descripcion, precio_venta, stock_actual, stock_minimo, imagen_url
+       FROM "Productos"
+       WHERE codigo = $1`,
+      [codigo],
+    );
 
-    if (error) return sendSupabaseError(res, error);
-    if (!data) return sendError(res, 404, 'Producto no encontrado');
-
-    return res.json(data);
+    if (rows.length === 0) return sendError(res, 404, 'Producto no encontrado');
+    return res.json(rows[0]);
   } catch (e) {
+    if (e.code) return sendDbError(res, e);
     return sendError(res, 500, e.message || 'Error inesperado');
   }
 });
@@ -383,15 +436,25 @@ app.post('/api/productos', async (req, res) => {
       payload.stock_minimo = Math.trunc(smin);
     }
 
-    const { data, error } = await supabase
-      .from('Productos')
-      .insert(payload)
-      .select('codigo, descripcion, precio_venta, costo, stock_actual, stock_minimo, imagen_url')
-      .single();
+    const { rows } = await pool.query(
+      `INSERT INTO "Productos" (codigo, id_categoria, descripcion, precio_venta, costo, stock_actual, stock_minimo, imagen_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING codigo, descripcion, precio_venta, costo, stock_actual, stock_minimo, imagen_url`,
+      [
+        payload.codigo,
+        payload.id_categoria,
+        payload.descripcion,
+        payload.precio_venta,
+        payload.costo,
+        payload.stock_actual,
+        payload.stock_minimo,
+        payload.imagen_url,
+      ],
+    );
 
-    if (error) return sendSupabaseError(res, error);
-    return res.status(201).json(data);
+    return res.status(201).json(rows[0]);
   } catch (e) {
+    if (e.code) return sendDbError(res, e);
     return sendError(res, 500, e.message || 'Error inesperado');
   }
 });
@@ -410,18 +473,16 @@ app.patch('/api/productos/:codigo/stock', async (req, res) => {
       return sendError(res, 400, 'nuevo_stock debe ser un número >= 0');
     }
 
-    const { data, error } = await supabase
-      .from('Productos')
-      .update({ stock_actual: Math.trunc(s) })
-      .eq('codigo', codigo)
-      .select('codigo, descripcion, precio_venta, costo, stock_actual, stock_minimo, imagen_url')
-      .maybeSingle();
+    const { rows } = await pool.query(
+      `UPDATE "Productos" SET stock_actual = $1 WHERE codigo = $2
+       RETURNING codigo, descripcion, precio_venta, costo, stock_actual, stock_minimo, imagen_url`,
+      [Math.trunc(s), codigo],
+    );
 
-    if (error) return sendSupabaseError(res, error);
-    if (!data) return sendError(res, 404, 'Producto no encontrado');
-
-    return res.json(data);
+    if (rows.length === 0) return sendError(res, 404, 'Producto no encontrado');
+    return res.json(rows[0]);
   } catch (e) {
+    if (e.code) return sendDbError(res, e);
     return sendError(res, 500, e.message || 'Error inesperado');
   }
 });
@@ -433,55 +494,60 @@ app.put('/api/productos/:codigo', async (req, res) => {
       return sendError(res, 400, 'El parámetro codigo es obligatorio');
     }
 
-    const {
-      descripcion,
-      precio_venta,
-      costo,
-      stock_minimo,
-    } = req.body || {};
+    const { descripcion, precio_venta, costo, stock_minimo } = req.body || {};
 
-    const update = {};
+    const setClauses = [];
+    const values = [];
+    let paramIdx = 1;
 
-    if (descripcion !== undefined) update.descripcion = String(descripcion || '').trim() || null;
-    
-    if (precio_venta !== undefined) {
-      const p = Number(precio_venta);
-      update.precio_venta = Number.isFinite(p) ? p : null;
+    if (descripcion !== undefined) {
+      setClauses.push(`descripcion = $${paramIdx++}`);
+      values.push(String(descripcion || '').trim() || null);
     }
-    
+
+    if (precio_venta !== undefined) {
+      setClauses.push(`precio_venta = $${paramIdx++}`);
+      const p = Number(precio_venta);
+      values.push(Number.isFinite(p) ? p : null);
+    }
+
     if (costo !== undefined) {
+      setClauses.push(`costo = $${paramIdx++}`);
       const c = Number(costo);
-      update.costo = Number.isFinite(c) ? c : null;
+      values.push(Number.isFinite(c) ? c : null);
     }
 
     if (stock_minimo !== undefined) {
       if (stock_minimo === null || stock_minimo === '') {
-        update.stock_minimo = null;
+        setClauses.push(`stock_minimo = $${paramIdx++}`);
+        values.push(null);
       } else {
         const smin = Number(stock_minimo);
         if (!Number.isFinite(smin) || smin < 0) {
           return sendError(res, 400, 'stock_minimo debe ser un número >= 0');
         }
-        update.stock_minimo = Math.trunc(smin);
+        setClauses.push(`stock_minimo = $${paramIdx++}`);
+        values.push(Math.trunc(smin));
       }
     }
 
-    if (Object.keys(update).length === 0) {
+    if (setClauses.length === 0) {
       return sendError(res, 400, 'No hay campos válidos para actualizar');
     }
 
-    const { data, error } = await supabase
-      .from('Productos')
-      .update(update)
-      .eq('codigo', codigo)
-      .select('codigo, descripcion, precio_venta, costo, stock_actual, stock_minimo, imagen_url')
-      .maybeSingle();
+    values.push(codigo);
+    const whereParam = `$${paramIdx}`;
 
-    if (error) return sendSupabaseError(res, error);
-    if (!data) return sendError(res, 404, 'Producto no encontrado');
+    const { rows } = await pool.query(
+      `UPDATE "Productos" SET ${setClauses.join(', ')} WHERE codigo = ${whereParam}
+       RETURNING codigo, descripcion, precio_venta, costo, stock_actual, stock_minimo, imagen_url`,
+      values,
+    );
 
-    return res.json(data);
+    if (rows.length === 0) return sendError(res, 404, 'Producto no encontrado');
+    return res.json(rows[0]);
   } catch (e) {
+    if (e.code) return sendDbError(res, e);
     return sendError(res, 500, e.message || 'Error inesperado');
   }
 });
@@ -493,48 +559,39 @@ app.delete('/api/productos/:codigo', async (req, res) => {
       return sendError(res, 400, 'El parámetro codigo es obligatorio');
     }
 
-    const { data: existe, error: existeError } = await supabase
-      .from('Productos')
-      .select('codigo')
-      .eq('codigo', codigo)
-      .maybeSingle();
+    const { rows: existe } = await pool.query(
+      'SELECT codigo FROM "Productos" WHERE codigo = $1',
+      [codigo],
+    );
+    if (existe.length === 0) return sendError(res, 404, 'Producto no encontrado');
 
-    if (existeError) return sendSupabaseError(res, existeError);
-    if (!existe) return sendError(res, 404, 'Producto no encontrado');
-
-    const { data: ingreso, error: ingresoError } = await supabase
-      .from('Ingresos_Stock')
-      .select('id_ingreso')
-      .eq('codigo_producto', codigo)
-      .limit(1);
-
-    if (ingresoError) return sendSupabaseError(res, ingresoError);
-    if ((ingreso || []).length > 0) {
+    const { rows: ingresos } = await pool.query(
+      'SELECT id_ingreso FROM "Ingresos_Stock" WHERE codigo_producto = $1 LIMIT 1',
+      [codigo],
+    );
+    if (ingresos.length > 0) {
       return sendError(res, 409, 'No se puede borrar: el producto tiene ingresos de stock');
     }
 
-    const { data: detalle, error: detalleError } = await supabase
-      .from('Detalle_Ventas')
-      .select('id_detalle')
-      .eq('codigo_producto', codigo)
-      .limit(1);
-
-    if (detalleError) return sendSupabaseError(res, detalleError);
-    if ((detalle || []).length > 0) {
+    const { rows: detalles } = await pool.query(
+      'SELECT id_detalle FROM "Detalle_Ventas" WHERE codigo_producto = $1 LIMIT 1',
+      [codigo],
+    );
+    if (detalles.length > 0) {
       return sendError(res, 409, 'No se puede borrar: el producto tiene ventas registradas');
     }
 
-    const { error: deleteError } = await supabase
-      .from('Productos')
-      .delete()
-      .eq('codigo', codigo);
-
-    if (deleteError) return sendSupabaseError(res, deleteError);
+    await pool.query('DELETE FROM "Productos" WHERE codigo = $1', [codigo]);
     return res.status(204).send();
   } catch (e) {
+    if (e.code) return sendDbError(res, e);
     return sendError(res, 500, e.message || 'Error inesperado');
   }
 });
+
+/* ------------------------------------------------------------------ */
+/*  Ingresos de stock                                                  */
+/* ------------------------------------------------------------------ */
 
 app.post('/api/ingresos-stock', async (req, res) => {
   try {
@@ -554,45 +611,40 @@ app.post('/api/ingresos-stock', async (req, res) => {
       return sendError(res, 400, 'costo_unitario debe ser un número >= 0');
     }
 
-    const { data: producto, error: productoError } = await supabase
-      .from('Productos')
-      .select('codigo, stock_actual')
-      .eq('codigo', codigo_producto)
-      .maybeSingle();
+    const { rows: prodRows } = await pool.query(
+      'SELECT codigo, stock_actual FROM "Productos" WHERE codigo = $1',
+      [codigo_producto],
+    );
+    if (prodRows.length === 0) return sendError(res, 404, 'Producto no encontrado');
 
-    if (productoError) return sendSupabaseError(res, productoError);
-    if (!producto) return sendError(res, 404, 'Producto no encontrado');
-
-    const currentStock = Number(producto.stock_actual) || 0;
+    const currentStock = Number(prodRows[0].stock_actual) || 0;
     const newStock = currentStock + Math.trunc(cantidad);
 
-    const { data: ingreso, error: ingresoError } = await supabase
-      .from('Ingresos_Stock')
-      .insert({
-        codigo_producto,
-        cantidad_ingresada: Math.trunc(cantidad),
-        costo_unitario: costo,
-      })
-      .select('*')
-      .single();
+    const { rows: ingresoRows } = await pool.query(
+      `INSERT INTO "Ingresos_Stock" (codigo_producto, cantidad_ingresada, costo_unitario)
+       VALUES ($1, $2, $3)
+       RETURNING *`,
+      [codigo_producto, Math.trunc(cantidad), costo],
+    );
 
-    if (ingresoError) return sendSupabaseError(res, ingresoError);
+    const { rows: updatedRows } = await pool.query(
+      `UPDATE "Productos" SET stock_actual = $1 WHERE codigo = $2
+       RETURNING *`,
+      [newStock, codigo_producto],
+    );
 
-    const { data: updatedProducto, error: updateError } = await supabase
-      .from('Productos')
-      .update({ stock_actual: newStock })
-      .eq('codigo', codigo_producto)
-      .select('*')
-      .maybeSingle();
+    if (updatedRows.length === 0) return sendError(res, 404, 'Producto no encontrado');
 
-    if (updateError) return sendSupabaseError(res, updateError);
-    if (!updatedProducto) return sendError(res, 404, 'Producto no encontrado');
-
-    return res.status(201).json({ ingreso, producto: updatedProducto });
+    return res.status(201).json({ ingreso: ingresoRows[0], producto: updatedRows[0] });
   } catch (e) {
+    if (e.code) return sendDbError(res, e);
     return sendError(res, 500, e.message || 'Error inesperado');
   }
 });
+
+/* ------------------------------------------------------------------ */
+/*  Ventas                                                             */
+/* ------------------------------------------------------------------ */
 
 function parseMesAnio({ mes, anio }) {
   const m = Number(mes);
@@ -613,6 +665,7 @@ function parseMesAnio({ mes, anio }) {
 const CODIGO_PERSONALIZADO = '999';
 
 app.post('/api/ventas', async (req, res) => {
+  const client = await pool.connect();
   try {
     const { items, fecha } = req.body || {};
 
@@ -635,14 +688,12 @@ app.post('/api/ventas', async (req, res) => {
     }
 
     const codigos = items.map((i) => i.codigo_producto);
-    const { data: productos, error: productosError } = await supabase
-      .from('Productos')
-      .select('codigo, precio_venta, costo, stock_actual')
-      .in('codigo', codigos);
+    const { rows: productos } = await client.query(
+      'SELECT codigo, precio_venta, costo, stock_actual FROM "Productos" WHERE codigo = ANY($1)',
+      [codigos],
+    );
 
-    if (productosError) return sendSupabaseError(res, productosError);
-
-    const productosByCodigo = new Map((productos || []).map((p) => [p.codigo, p]));
+    const productosByCodigo = new Map(productos.map((p) => [p.codigo, p]));
 
     for (const item of items) {
       const p = productosByCodigo.get(item.codigo_producto);
@@ -674,28 +725,26 @@ app.post('/api/ventas', async (req, res) => {
       return acc + Number(d.cantidad) * precio;
     }, 0);
 
-    const { data: venta, error: ventaError } = await supabase
-      .from('Ventas')
-      .insert({
-        fecha: ventaFecha.toISOString(),
-        total_facturado: totalFacturado,
-      })
-      .select('*')
-      .single();
+    await client.query('BEGIN');
 
-    if (ventaError) return sendSupabaseError(res, ventaError);
+    const { rows: ventaRows } = await client.query(
+      `INSERT INTO "Ventas" (fecha, total_facturado)
+       VALUES ($1, $2)
+       RETURNING *`,
+      [ventaFecha.toISOString(), totalFacturado],
+    );
+    const venta = ventaRows[0];
 
-    const detalleConVenta = detallePayload.map((d) => ({
-      ...d,
-      id_venta: venta.id_venta,
-    }));
-
-    const { data: detalle, error: detalleError } = await supabase
-      .from('Detalle_Ventas')
-      .insert(detalleConVenta)
-      .select('*');
-
-    if (detalleError) return sendSupabaseError(res, detalleError);
+    const detalleRows = [];
+    for (const d of detallePayload) {
+      const { rows } = await client.query(
+        `INSERT INTO "Detalle_Ventas" (id_venta, codigo_producto, cantidad, precio_historico, costo_historico, descripcion_custom)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING *`,
+        [venta.id_venta, d.codigo_producto, d.cantidad, d.precio_historico, d.costo_historico, d.descripcion_custom || null],
+      );
+      detalleRows.push(rows[0]);
+    }
 
     for (const item of items) {
       if (item.codigo_producto === CODIGO_PERSONALIZADO) continue;
@@ -703,19 +752,27 @@ app.post('/api/ventas', async (req, res) => {
       if (p.stock_actual == null) continue;
       const newStock = (Number(p.stock_actual) || 0) - Number(item.cantidad);
 
-      const { error: updateError } = await supabase
-        .from('Productos')
-        .update({ stock_actual: newStock })
-        .eq('codigo', item.codigo_producto);
-
-      if (updateError) return sendSupabaseError(res, updateError);
+      await client.query(
+        'UPDATE "Productos" SET stock_actual = $1 WHERE codigo = $2',
+        [newStock, item.codigo_producto],
+      );
     }
 
-    return res.status(201).json({ venta, detalle });
+    await client.query('COMMIT');
+
+    return res.status(201).json({ venta, detalle: detalleRows });
   } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (e.code) return sendDbError(res, e);
     return sendError(res, 500, e.message || 'Error inesperado');
+  } finally {
+    client.release();
   }
 });
+
+/* ------------------------------------------------------------------ */
+/*  Reportes                                                           */
+/* ------------------------------------------------------------------ */
 
 app.get('/api/reportes/unidades', async (req, res) => {
   try {
@@ -724,28 +781,22 @@ app.get('/api/reportes/unidades', async (req, res) => {
 
     const { startISO, endISO } = parsed;
 
-    const { data, error } = await supabase
-      .from('Detalle_Ventas')
-      .select('codigo_producto, cantidad, Ventas!inner(fecha)')
-      .gte('Ventas.fecha', startISO)
-      .lt('Ventas.fecha', endISO);
+    const { rows } = await pool.query(
+      `SELECT dv.codigo_producto, SUM(dv.cantidad)::int AS unidades
+       FROM "Detalle_Ventas" dv
+       INNER JOIN "Ventas" v ON dv.id_venta = v.id_venta
+       WHERE v.fecha >= $1 AND v.fecha < $2
+       GROUP BY dv.codigo_producto`,
+      [startISO, endISO],
+    );
 
-    if (error) return sendSupabaseError(res, error);
-
-    const agrupado = new Map();
-    for (const row of data || []) {
-      const codigo = row.codigo_producto;
-      const cant = Number(row.cantidad) || 0;
-      agrupado.set(codigo, (agrupado.get(codigo) || 0) + cant);
-    }
-
-    const result = Array.from(agrupado.entries()).map(([codigo_producto, unidades]) => ({
-      codigo_producto,
-      unidades,
-    }));
-
-    return res.json({ desde: startISO, hasta: endISO, items: result });
+    return res.json({
+      desde: startISO,
+      hasta: endISO,
+      items: rows.map((r) => ({ codigo_producto: r.codigo_producto, unidades: r.unidades })),
+    });
   } catch (e) {
+    if (e.code) return sendDbError(res, e);
     return sendError(res, 500, e.message || 'Error inesperado');
   }
 });
@@ -757,40 +808,36 @@ app.get('/api/reportes/financiero', async (req, res) => {
 
     const { startISO, endISO } = parsed;
 
-    const { data, error } = await supabase
-      .from('Detalle_Ventas')
-      .select('cantidad, precio_historico, costo_historico, Ventas!inner(fecha)')
-      .gte('Ventas.fecha', startISO)
-      .lt('Ventas.fecha', endISO);
-
-    if (error) return sendSupabaseError(res, error);
-
-    const totals = (data || []).reduce(
-      (acc, row) => {
-        const cantidad = Number(row.cantidad) || 0;
-        const precio = row.precio_historico == null ? 0 : Number(row.precio_historico);
-        const costo = row.costo_historico == null ? 0 : Number(row.costo_historico);
-
-        acc.totalFacturado += cantidad * precio;
-        acc.totalCosto += cantidad * costo;
-        return acc;
-      },
-      { totalFacturado: 0, totalCosto: 0 }
+    const { rows } = await pool.query(
+      `SELECT
+         COALESCE(SUM(dv.cantidad * COALESCE(dv.precio_historico, 0)), 0) AS total_facturado,
+         COALESCE(SUM(dv.cantidad * COALESCE(dv.costo_historico, 0)), 0) AS total_costo
+       FROM "Detalle_Ventas" dv
+       INNER JOIN "Ventas" v ON dv.id_venta = v.id_venta
+       WHERE v.fecha >= $1 AND v.fecha < $2`,
+      [startISO, endISO],
     );
 
-    const utilidad = totals.totalFacturado - totals.totalCosto;
+    const totals = rows[0] || { total_facturado: 0, total_costo: 0 };
+    const totalFacturado = Number(totals.total_facturado);
+    const totalCosto = Number(totals.total_costo);
 
     return res.json({
       desde: startISO,
       hasta: endISO,
-      total_facturado: totals.totalFacturado,
-      total_costo: totals.totalCosto,
-      utilidad,
+      total_facturado: totalFacturado,
+      total_costo: totalCosto,
+      utilidad: totalFacturado - totalCosto,
     });
   } catch (e) {
+    if (e.code) return sendDbError(res, e);
     return sendError(res, 500, e.message || 'Error inesperado');
   }
 });
+
+/* ------------------------------------------------------------------ */
+/*  Start server                                                       */
+/* ------------------------------------------------------------------ */
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
